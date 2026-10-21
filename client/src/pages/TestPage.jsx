@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { BarChart, Bar as RBar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import { api } from '../api.js';
-import { Stat, Status, Bar, Tabs, fmtDate, fmtDur, pctClass } from '../components/ui.jsx';
+import { useTheme } from '../theme.jsx';
+import { Stat, Status, Bar, Tabs, TermBadge, fmtDate, fmtDur, pctClass, yearOptions, SEMESTERS } from '../components/ui.jsx';
 
-const COLORS = { ok: '#22a55b', warn: '#e19a1c', bad: '#dc4444' };
 
 function Pipeline({ testId, data, onRetry, onStop, onResume }) {
   const { nodes, workflow, eta_seconds } = data;
@@ -42,6 +42,7 @@ function Pipeline({ testId, data, onRetry, onStop, onResume }) {
 }
 
 function Overview({ a }) {
+  const { colors: COLORS } = useTheme();
   if (!a.graded) return <div className="card empty">No graded students yet.</div>;
   return (
     <>
@@ -88,6 +89,34 @@ function Overview({ a }) {
   );
 }
 
+function EditDetails({ test, onClose, onSaved }) {
+  const [f, setF] = useState({ title: test.title, academic_year: test.academic_year || '', semester: test.semester ? String(test.semester) : '' });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const save = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr('');
+    try { await api.put(`/tests/${test._id}`, f); onSaved(); onClose(); } catch (x) { setErr(x.message); setBusy(false); }
+  };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <form className="dialog" onClick={(e) => e.stopPropagation()} onSubmit={save}>
+        <h2>Test details</h2>
+        {err && <div className="err">{err}</div>}
+        <div className="field"><label>Test name</label><input value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} required /></div>
+        <div className="field"><label>Academic year</label><input list="years-edit" placeholder="e.g. 2026-27" value={f.academic_year} onChange={(e) => setF({ ...f, academic_year: e.target.value })} />
+          <datalist id="years-edit">{yearOptions().map((y) => <option key={y} value={y} />)}</datalist></div>
+        <div className="field"><label>Semester</label>
+          <div className="chips">{SEMESTERS.map((s) => <button type="button" key={s} className={f.semester === String(s) ? 'on' : ''} onClick={() => setF({ ...f, semester: f.semester === String(s) ? '' : String(s) })}>{s}</button>)}</div></div>
+        <div className="flex" style={{ justifyContent: 'flex-end' }}>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function Students({ testId, results }) {
   const nav = useNavigate();
   const [q, setQ] = useState('');
@@ -115,7 +144,7 @@ function Students({ testId, results }) {
             <tr key={r.id} className="click" onClick={() => nav(`/tests/${testId}/students/${r.id}`)}>
               <td className="muted">{i + 1}</td>
               <td><Link to={`/tests/${testId}/students/${r.id}`} onClick={(e) => e.stopPropagation()}><b>{r.name}</b></Link></td>
-              <td className="muted">{r.roll_no || '-'}</td>
+              <td className="muted">{r.roll_no || '-'}{r.total != null && <Link className="small profile-link" to={`/students/${r.student_key}`} onClick={(e) => e.stopPropagation()} title="All tests for this student"> · profile</Link>}</td>
               <td><b>{r.total ?? '-'}</b><span className="muted"> / {r.max_total}</span></td>
               <td>{r.percentage ?? '-'}</td><td>{r.grade || '-'}</td>
               {qids.map((id) => { const x = r.questions.find((y) => y.q_id === id); return <td key={id} style={{ color: x && !x.counted ? 'var(--muted)' : undefined }}>{x ? x.marks : '-'}<span className="muted small">/{x?.max}</span></td>; })}
@@ -137,6 +166,7 @@ export default function TestPage() {
   const [results, setResults] = useState([]);
   const [tab, setTab] = useState(null);
   const [err, setErr] = useState('');
+  const [editing, setEditing] = useState(false);
 
   const load = async () => {
     try {
@@ -166,13 +196,14 @@ export default function TestPage() {
     <>
       <div className="page-head">
         <div className="grow">
-          <div className="muted small"><Link to="/">Dashboard</Link> / <Link to={`/subjects/${test.subject_id}`}>{test.subject_name}</Link></div>
-          <h1>{test.title} <Status s={test.status} /></h1>
+          <div className="crumbs"><Link to="/">Dashboard</Link><span>/</span><Link to={`/subjects/${test.subject_id}`}>{test.subject_name}</Link></div>
+          <h1 className="flex" style={{ gap: 10 }}>{test.title} <Status s={test.status} /> <TermBadge year={test.academic_year} sem={test.semester} /></h1>
           <div className="muted">{test.student_count || '?'} student script{test.student_count === 1 ? '' : 's'} - started {fmtDate(test.created_at)}</div>
         </div>
         <div className="flex">
           {test.files?.has_question_paper && <a className="btn sm" href={api.fileUrl(`/tests/${id}/files/question_paper`)} target="_blank" rel="noreferrer">Question paper</a>}
           {test.files?.has_model_answer && <a className="btn sm" href={api.fileUrl(`/tests/${id}/files/model_answer`)} target="_blank" rel="noreferrer">Model answer</a>}
+          <button className="btn sm" onClick={() => setEditing(true)}>Edit details</button>
           {data.workflow && <Link className="btn sm" to={`/tests/${id}/workflow`}>Workflow</Link>}
           <button className="btn sm danger" onClick={async () => { if (window.confirm('Delete this test and all its results?')) { await api.del(`/tests/${id}`); nav('/'); } }}>Delete</button>
         </div>
@@ -184,6 +215,7 @@ export default function TestPage() {
       <Tabs value={active} onChange={setTab} tabs={[...(done ? [['overview', 'Overview'], ['students', 'Students']] : []), ['pipeline', 'Pipeline']]} />
       {active === 'overview' && an && <Overview a={an} />}
       {active === 'students' && <Students testId={id} results={results} />}
+      {editing && <EditDetails test={test} onClose={() => setEditing(false)} onSaved={load} />}
       {active === 'pipeline' && <Pipeline testId={id} data={data} onStop={act('stop')} onResume={act('resume')} onRetry={async (nid) => { await api.post(`/tests/${id}/nodes/${nid}/retry`); load(); }} />}
     </>
   );

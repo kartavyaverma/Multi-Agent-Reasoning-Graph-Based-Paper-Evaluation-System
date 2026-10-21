@@ -1,5 +1,4 @@
 import { embed } from '../../ai/llm.js';
-import { config } from '../../config.js';
 import { itemsOf, upstreamError } from './util.js';
 import { unitPlan } from './student.js';
 
@@ -92,7 +91,7 @@ export const graphCompare = {
     qids.forEach((q) => { refs[q].nodes.forEach((n) => texts.push(n.text)); stuGraphs[q].nodes.forEach((n) => texts.push(n.text)); });
     const vecs = texts.length ? await embed(texts) : null;
     const method = vecs ? 'embedding-cosine' : 'lexical-overlap';
-    const th = vecs ? { match: config.grading.nodeMatch, partial: config.grading.nodePartial } : { match: 0.5, partial: 0.3 };
+    const th = vecs ? { match: ctx.grading.nodeMatch, partial: ctx.grading.nodePartial } : { match: 0.5, partial: 0.3 };
 
     let off = 0;
     const comparisons = {};

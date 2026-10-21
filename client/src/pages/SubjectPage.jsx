@@ -2,11 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { api } from '../api.js';
+import { useTheme } from '../theme.jsx';
 import { Stat, Status, fmtDate } from '../components/ui.jsx';
 
 export default function SubjectPage() {
   const { id } = useParams();
   const nav = useNavigate();
+  const { colors: C } = useTheme();
   const [d, setD] = useState(null);
   const [err, setErr] = useState('');
   useEffect(() => { api.get(`/subjects/${id}`).then(setD).catch((e) => setErr(e.message)); }, [id]);
@@ -18,7 +20,7 @@ export default function SubjectPage() {
   return (
     <>
       <div className="page-head">
-        <div className="grow"><div className="muted small"><Link to="/">Dashboard</Link></div><h1>{d.subject.name}</h1><div className="muted">{d.tests.length} test{d.tests.length === 1 ? '' : 's'}</div></div>
+        <div className="grow"><div className="crumbs"><Link to="/">Dashboard</Link><span>/</span>Subject</div><h1>{d.subject.name}</h1><div className="muted">{d.tests.length} test{d.tests.length === 1 ? '' : 's'}</div></div>
         <Link to="/tests/new" className="btn primary">+ New test</Link>
         <button className="btn danger" onClick={async () => { if (window.confirm('Delete this subject with ALL its tests and results?')) { await api.del(`/subjects/${id}`); nav('/'); } }}>Delete subject</button>
       </div>
@@ -33,7 +35,7 @@ export default function SubjectPage() {
           <h2>Performance across tests</h2>
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={d.trend}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="title" fontSize={12} /><YAxis domain={[0, 100]} fontSize={12} /><Tooltip /><Legend />
-              <Line type="monotone" dataKey="average" name="Average %" stroke="#4f46e5" strokeWidth={2} /><Line type="monotone" dataKey="pass_rate" name="Pass rate %" stroke="#22a55b" strokeWidth={2} /></LineChart>
+              <Line type="monotone" dataKey="average" name="Average %" stroke={C.accent} strokeWidth={2} /><Line type="monotone" dataKey="pass_rate" name="Pass rate %" stroke={C.ok} strokeWidth={2} strokeDasharray="4 3" /></LineChart>
           </ResponsiveContainer>
         </div>
       )}

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { ThemeMenu } from '../theme.jsx';
 
 export default function Auth({ mode, onAuth }) {
   const signup = mode === 'signup';
@@ -17,12 +18,14 @@ export default function Auth({ mode, onAuth }) {
 
   return (
     <div className="auth-wrap">
+      <div className="auth-theme"><ThemeMenu /></div>
       <div className="auth-card">
         <div className="hero">
-          <div className="logo">Paper<span>Check</span></div>
+          <div className="logo"><span className="logo-mark">P</span><span className="logo-word">Paper<i>check</i></span></div>
           <p className="muted">Upload the question paper, model answers and student scripts. Get marks, reasoning and class analytics.</p>
+          <div className="hero-pills"><span>Multi-agent grading</span><span>Reasoning graphs</span><span>Runs locally</span></div>
         </div>
-        <form className="card" onSubmit={submit}>
+        <form className="card auth-form" onSubmit={submit}>
           <h2>{signup ? 'Create teacher account' : 'Sign in'}</h2>
           {err && <div className="err">{err}</div>}
           {signup && <div className="field"><label>Full name</label><input value={f.name} onChange={set('name')} required /></div>}

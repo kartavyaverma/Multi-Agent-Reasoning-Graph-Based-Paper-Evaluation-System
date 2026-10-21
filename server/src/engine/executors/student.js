@@ -15,24 +15,12 @@ export const transcribeText = {
     const unit = unitsOf(ctx).find((u) => u.unit_id === batch.key);
     const qs = questionsOf(ctx);
     const parts = [
-      { text: `You are an expert examiner's assistant doing HANDWRITING TRANSCRIPTION of ONE student's answer script (scanned pages or photos).
-
-Questions on the paper:
+      { text: ctx.prompt('transcribe_text', `Questions on the paper:
 ${qs.map(fmtQuestion).join('\n')}
 
-Tasks:
-1. Read the student's identity from the header/cover: "name", "roll_no" (USN / registration / roll number), "section" if present. If unreadable use null. Never invent a name.
-2. For EACH question id above, transcribe what the student wrote for it. The student may answer out of order, label answers loosely ("Ans 2(a)"), continue across pages, or skip questions. Map text to the correct question id.
-3. Transcribe VERBATIM. Do NOT correct spelling, grammar, facts, or calculations - the student's mistakes must be preserved because they will be graded. Write [illegible] for words you cannot read, and [?word] when unsure.
-4. Preserve mathematics: write equations in plain text/LaTeX-lite, keep each line of working on its own line, keep units. Keep tables as markdown tables. Keep code with indentation.
-5. Crossed-out work: put it in "struck_out" and do NOT include it in "text".
-6. Diagrams, graphs, circuits, flowcharts, sketches, images: do NOT try to transcribe them. Set "has_figure": true and in "figure_note" say in one line where it is and what it appears to be. (A separate specialist will analyse the figure.) Text labels that belong to a diagram should go in the figure note only.
-7. "attempted": false if the question has no answer at all.
-8. "legibility": 0-1, how confident you are in your transcription of that answer (1 = crystal clear print, 0.5 = messy but mostly readable, <0.3 = largely guessed).
-9. Anything written that you could not map to a question goes into "unmapped_text".
 ${JSON_RULES}
 
-Schema: {"student":{"name":string|null,"roll_no":string|null,"section":string|null,"identity_confidence":number},"answers":[{"q_id":string,"attempted":boolean,"text":string,"struck_out":string,"has_figure":boolean,"figure_note":string,"legibility":number}],"unmapped_text":string,"page_count":number,"script_quality_notes":string}` },
+Schema: {"student":{"name":string|null,"roll_no":string|null,"section":string|null,"identity_confidence":number},"answers":[{"q_id":string,"attempted":boolean,"text":string,"struck_out":string,"has_figure":boolean,"figure_note":string,"legibility":number}],"unmapped_text":string,"page_count":number,"script_quality_notes":string}`) },
       await filePart(unit.path, unit.mime),
     ];
     const res = await generateJson({
@@ -85,29 +73,15 @@ export const analyzeFigures = {
     if (!targets.length) return { figures: [], skipped: 'no figure-based questions' };
 
     const parts = [
-      { text: `You are a subject examiner evaluating the DIAGRAMS / GRAPHS / FIGURES / TABLES in ONE student's scanned answer script.
-
-For each question below, find the student's figure for it in the attached script and compare it with the examiner's specification.
-
-${targets.map((q) => `### Q${q.id} [${q.marks} marks] ${q.text}
+      { text: ctx.prompt('analyze_figures', `${targets.map((q) => `### Q${q.id} [${q.marks} marks] ${q.text}
 Expected figure: ${model[q.id]?.figure_spec?.description || '(not specified - use standard textbook expectations)'}
 Required labels/parts: ${(model[q.id]?.figure_spec?.labels || []).join(', ') || '(not specified)'}
 Student's text answer (transcribed): ${trBy[q.id]?.text || '(none)'}
 Transcriber note: ${trBy[q.id]?.figure_note || '(none)'}`).join('\n\n')}
 
-For each question output:
-- "figure_present": did the student draw/include a figure for it?
-- "kind": circuit | graph | flowchart | geometry | biological | block-diagram | table | map | other.
-- "description": objectively describe what the student drew (components, shapes, axes, arrows, values).
-- "labels_present": labels actually written on it. "labels_missing": required labels absent.
-- "errors": concrete mistakes (wrong symbol, wrong direction, wrong axis, missing units, wrong connection, wrong scale...).
-- "correctness": 0-1 how well it matches the expectation (0 = absent or wrong, 1 = fully correct and well labelled).
-- "neatness": 0-1 (informational).
-- "confidence": 0-1 how sure you are of this judgement given image clarity.
-Be strict but fair; credit equivalent valid representations.
 ${JSON_RULES}
 
-Schema: {"figures":[{"q_id":string,"figure_present":boolean,"kind":string,"description":string,"labels_present":[string],"labels_missing":[string],"errors":[string],"correctness":number,"neatness":number,"confidence":number}]}` },
+Schema: {"figures":[{"q_id":string,"figure_present":boolean,"kind":string,"description":string,"labels_present":[string],"labels_missing":[string],"errors":[string],"correctness":number,"neatness":number,"confidence":number}]}`) },
       await filePart(unit.path, unit.mime),
     ];
     const res = await generateJson({
@@ -132,15 +106,10 @@ export const extractReasoning = {
     const qs = Object.fromEntries(questionsOf(ctx).map((q) => [q.id, q]));
     const res = await generateJson({
       task: `reasoning:${id}`,
-      parts: [{ text: `Convert each STUDENT answer into a REASONING GRAPH that reflects exactly what the student wrote.
-- Each node = ONE atomic claim/step the student made (definition, principle, step, calculation, example, fact, conclusion), as a short self-contained sentence (max 25 words). Keep the student's own wording/meaning.
-- Do NOT add steps the student omitted, and do NOT silently fix their errors - an incorrect statement must appear as a node with its incorrect content.
-- Edges capture the logical flow the student used: "leads_to", "supports", "depends_on", "contradicts". Order matters.
-- Node ids "n1","n2",... unique per question.
-${JSON_RULES}
+      parts: [{ text: ctx.prompt('extract_reasoning', `${JSON_RULES}
 Schema: ${GRAPH_SCHEMA}
 
-${answered.map((a) => `### Q${a.q_id}: ${qs[a.q_id]?.text}\nSTUDENT ANSWER:\n${a.text}`).join('\n\n')}` }],
+${answered.map((a) => `### Q${a.q_id}: ${qs[a.q_id]?.text}\nSTUDENT ANSWER:\n${a.text}`).join('\n\n')}`) }],
       mock: () => ({
         graphs: answered.map((a) => {
           const q = mockQuality(id);

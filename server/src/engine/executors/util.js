@@ -1,5 +1,3 @@
-import { config } from '../../config.js';
-
 /** Question ids become object keys in the DB, which forbids '.' and '$'. */
 export const nid = (s) => String(s).replace(/[.$\s]/g, '');
 export const clamp = (x, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, Number.isFinite(x) ? x : lo));
@@ -50,5 +48,3 @@ export const JSON_RULES = 'Respond with a single valid JSON object only. No mark
 export function fmtQuestion(q) {
   return `Q${q.id} [${q.marks} marks]${q.type ? ` (${q.type})` : ''}: ${q.text}`;
 }
-
-export const W = config.grading.weights;

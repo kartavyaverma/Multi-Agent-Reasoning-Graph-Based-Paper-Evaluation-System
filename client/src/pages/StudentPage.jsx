@@ -130,10 +130,11 @@ export default function StudentPage() {
     <>
       <div className="page-head">
         <div className="grow">
-          <div className="muted small"><Link to="/">Dashboard</Link> / <Link to={`/tests/${id}`}>{d.test.title}</Link></div>
+          <div className="crumbs"><Link to="/">Dashboard</Link><span>/</span><Link to={`/tests/${id}`}>{d.test.title}</Link><span>/</span>{r.name}</div>
           <h1>{r.name} <Status s={r.status} /></h1>
           <div className="muted">{r.roll_no ? `Roll no ${r.roll_no}` : 'Roll number not found'}{r.section ? ` - Section ${r.section}` : ''}{r.identity_confidence != null && r.identity_confidence < 0.6 ? ' - (name read with low confidence, please verify)' : ''}</div>
         </div>
+        {r.total != null && <Link className="btn" to={`/students/${r.student_key}`}>All tests &amp; analytics →</Link>}
         <button className="btn" onClick={() => setScan(true)}>View original scan</button>
       </div>
       {r.status === 'error' && <div className="err">This script could not be processed: {r.error}. Re-upload the file in a new test, or retry from the Pipeline tab.</div>}

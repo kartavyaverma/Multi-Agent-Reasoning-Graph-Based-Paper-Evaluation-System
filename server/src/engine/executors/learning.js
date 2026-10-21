@@ -26,20 +26,11 @@ Reference steps missing from the student's reasoning: ${q.graph?.missing?.join('
 Examiner feedback: ${q.feedback}`).join('\n\n');
     const res = await generateJson({
       task: `gaps:${batch.key}`, temperature: 0.3,
-      parts: [{ text: `You are a supportive tutor. A student lost marks on the questions below. Analyse the pattern across them and build a PERSONALISED learning pack that targets exactly what this student got wrong or left out.
+      parts: [{ text: ctx.prompt('knowledge_gaps', `STRONG QUESTIONS (scored 70%+): ${attempted.filter((q) => q.fraction >= 0.7).map((q) => 'Q' + q.q_id).join(', ') || 'none'}
 
-Return:
-- "summary": 2-3 encouraging but honest sentences on overall performance.
-- "strengths": short list of what the student does well (from the questions where they scored well: ${attempted.filter((q) => q.fraction >= 0.7).map((q) => 'Q' + q.q_id).join(', ') || 'none'}).
-- "weaknesses": [{"topic": string (a concept, not a question number), "severity": "high"|"medium"|"low", "evidence": string, "q_ids": [string]}]  - group related errors into concepts; missing reasoning steps and logical errors count too.
-- "notes": [{"topic": string, "content": string}] concise revision notes (markdown, 80-150 words each) for each high/medium weakness, written to fix the specific misconception or missing step.
-- "practice_questions": [{"topic": string, "question": string, "difficulty": "easy"|"medium"|"hard", "hint": string}] 2 per weakness, targeting the missing reasoning steps; do not repeat the exam questions verbatim.
-- "step_explanations": [{"q_id": string, "where_it_went_wrong": string, "correct_reasoning": string}] step-by-step contrast of the student's reasoning vs the correct reasoning for the 3 costliest questions.
-- "video_queries": [{"topic": string, "query": string}] good YouTube search phrases for each weakness.
-- "study_plan": 3-5 ordered action items.
 ${JSON_RULES}
 
-${block}` }],
+${block}`) }],
       mock: () => ({
         summary: 'Mock summary.', strengths: ['Basic definitions'],
         weaknesses: [{ topic: 'Conservation principle', severity: 'high', evidence: 'Missing step B', q_ids: weak.map((q) => q.q_id) }],
