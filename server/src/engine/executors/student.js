@@ -1,5 +1,5 @@
 import { generateJson, filePart } from '../../ai/llm.js';
-import { nid, questionsOf, modelOf, unitsOf, itemsOf, upstreamError, JSON_RULES, fmtQuestion } from './util.js';
+import { qidMap, questionsOf, modelOf, unitsOf, itemsOf, upstreamError, JSON_RULES, fmtQuestion } from './util.js';
 import { GRAPH_SCHEMA } from './parse.js';
 
 const unitPlan = (ctx) => unitsOf(ctx).map((u) => ({ key: u.unit_id, meta: { label: u.label } }));
@@ -38,7 +38,7 @@ Schema: {"student":{"name":string|null,"roll_no":string|null,"section":string|nu
         };
       },
     });
-    const byId = Object.fromEntries((res.answers || []).map((a) => [nid(a.q_id), a]));
+    const byId = Object.fromEntries((res.answers || []).map((a) => [qidMap(qs)(a.q_id), a]));
     return {
       student: { name: res.student?.name || null, roll_no: res.student?.roll_no || null, section: res.student?.section || null, identity_confidence: res.student?.identity_confidence ?? 0.5 },
       answers: qs.map((q) => {
@@ -88,7 +88,7 @@ Schema: {"figures":[{"q_id":string,"figure_present":boolean,"kind":string,"descr
       task: `figures:${id}`, parts,
       mock: () => ({ figures: targets.map((q) => ({ q_id: q.id, figure_present: true, kind: 'circuit', description: 'Mock sketch', labels_present: ['cell'], labels_missing: ['ammeter'], errors: [], correctness: 0.4 + 0.5 * (unitNo(id) % 2), neatness: 0.7, confidence: 0.8 })) }),
     });
-    return { figures: (res.figures || []).map((f) => ({ ...f, q_id: nid(f.q_id) })) };
+    return { figures: (res.figures || []).map((f) => ({ ...f, q_id: qidMap(qs)(f.q_id) })) };
   },
 };
 
@@ -119,7 +119,7 @@ ${answered.map((a) => `### Q${a.q_id}: ${qs[a.q_id]?.text}\nSTUDENT ANSWER:\n${a
         }),
       }),
     });
-    return { graphs: Object.fromEntries((res.graphs || []).map((g) => [nid(g.q_id), { nodes: g.nodes || [], edges: g.edges || [] }])) };
+    return { graphs: Object.fromEntries((res.graphs || []).map((g) => [qidMap(Object.values(qs))(g.q_id), { nodes: g.nodes || [], edges: g.edges || [] }])) };
   },
   combine: (items) => ({ items }),
 };

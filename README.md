@@ -3,7 +3,22 @@
 Teacher signs up -> creates a subject/test -> uploads **question paper + model answer + student answer sheets** ->
 the workflow engine evaluates every student -> analytics + question-wise marks per student.
 
-## Run it
+## Run it with Ollama Cloud (no local GPU)
+Create a key at [ollama.com/settings/keys](https://ollama.com/settings/keys), pick a model tagged **vision** at
+[ollama.com/search?c=cloud](https://ollama.com/search?c=cloud), and put this in `.env` (no `MOCK_AI`):
+```
+OLLAMA_HOST=https://ollama.com
+OLLAMA_API_KEY=your-key-here
+OLLAMA_VISION_MODEL=gemma4:31b
+OLLAMA_EMBED_MODEL=
+OLLAMA_NUM_CTX=262144
+OLLAMA_NUM_PREDICT=65536
+OLLAMA_MAX_PAGES=60
+```
+The free tier has session/weekly usage limits; about 9-10 AI calls per student. On HTTP 429 the server backs off and retries.
+Embeddings are optional: left empty, reasoning graphs are compared lexically; set `OLLAMA_EMBED_HOST` to use a local Ollama for them.
+
+## Run it locally
 1. Install Ollama: https://ollama.com/download, then pull the models:
    `ollama pull qwen3-vl:2b-instruct` and `ollama pull nomic-embed-text`
 2. `copy .env.example .env`

@@ -83,7 +83,7 @@ api.delete('/subjects/:id', h(async (req, res) => {
 /* ───────────── dashboard ───────────── */
 api.get('/dashboard', h(async (req, res) => {
   const d = await dashboard(req.user._id, req.query);
-  res.json({ ...d, ai_configured: config.ai.mock || (await checkModels()).ok, ai_mock: config.ai.mock });
+  res.json({ ...d, ai_configured: config.ai.mock || (await checkModels()).ok, ai_mock: config.ai.mock, ai_cloud: config.ai.cloud });
 }));
 
 /* ───────────── students across tests ───────────── */
@@ -463,6 +463,54 @@ api.get('/tests/:id/export.csv', h(async (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="${t.title.replace(/[^\w]+/g, '_')}_results.csv"`);
   res.send(lines.join('\n'));
+}));
+
+/* ───────────── answer-sheet pages as images (marked-script view) ───────────── */
+const pageJobs = new Map(); // unit path -> promise of page files, so concurrent requests render once
+
+/** Renders a student's script to PNG pages once and caches them under uploads/<test>/pages/. */
+async function unitPages(t, unitId) {
+  const wf = await db.workflows.findOne({ _id: t.workflow_id });
+  const u = wf?.output?.ingest?.units?.find((x) => x.unit_id === unitId);
+  if (!u || !fs.existsSync(u.path)) return null;
+  if (u.mime !== 'application/pdf') return [{ path: u.path, mime: u.mime }];
+  const dir = path.join(config.dataDir, 'uploads', t._id, 'pages');
+  const prefix = `${unitId.replace(/[^\w-]/g, '')}-`;
+  const cached = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.startsWith(prefix)).sort((a, b) => parseInt(a.slice(prefix.length), 10) - parseInt(b.slice(prefix.length), 10)) : [];
+  if (cached.length) return cached.map((f) => ({ path: path.join(dir, f), mime: 'image/png' }));
+  if (!pageJobs.has(u.path)) {
+    pageJobs.set(u.path, (async () => {
+      const { pdf } = await import('pdf-to-img');
+      fs.mkdirSync(dir, { recursive: true });
+      const out = [];
+      let i = 0;
+      for await (const img of await pdf(u.path, { scale: 1.6 })) {
+        const p = path.join(dir, `${prefix}${++i}.png`);
+        fs.writeFileSync(p, img);
+        out.push({ path: p, mime: 'image/png' });
+        if (i >= 60) break;
+      }
+      return out;
+    })().finally(() => pageJobs.delete(u.path)));
+  }
+  return pageJobs.get(u.path);
+}
+
+api.get('/tests/:id/units/:unit/pages', h(async (req, res) => {
+  const t = await ownedTest(req);
+  const pages = t && (await unitPages(t, req.params.unit));
+  if (!pages) return res.status(404).json({ error: 'Answer sheet not found' });
+  res.json({ count: pages.length });
+}));
+
+api.get('/tests/:id/units/:unit/pages/:n', h(async (req, res) => {
+  const t = await ownedTest(req);
+  const pages = t && (await unitPages(t, req.params.unit));
+  const p = pages?.[Number(req.params.n) - 1];
+  if (!p) return res.status(404).json({ error: 'Page not found' });
+  res.setHeader('Content-Type', p.mime);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.sendFile(path.resolve(p.path));
 }));
 
 /* ───────────── original scans (for verifying OCR) ───────────── */

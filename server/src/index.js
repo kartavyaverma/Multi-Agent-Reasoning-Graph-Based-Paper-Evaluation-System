@@ -38,7 +38,10 @@ app.listen(config.port, async () => {
   console.log(`PaperCheck running on http://localhost:${config.port}`);
   if (config.ai.mock) return console.log('AI: MOCK mode (no real grading)');
   const m = await checkModels();
-  if (m.down) console.log(`AI: Ollama not reachable at ${config.ai.host} - start the Ollama app`);
-  else if (m.missing.length) console.log(`AI: missing models - run: ${m.missing.map((x) => `ollama pull ${x}`).join(' && ')}`);
-  else console.log(`AI: Ollama (${[...new Set([config.ai.visionModel, config.ai.textModel])].join(', ')}, embed: ${config.ai.embedModel || 'off'})`);
+  const c = config.ai;
+  if (m.auth) console.log('AI: Ollama Cloud rejected the request - set a valid OLLAMA_API_KEY (ollama.com/settings/keys)');
+  else if (m.down) console.log(c.cloud ? 'AI: cannot reach Ollama Cloud (https://ollama.com) - check your connection' : `AI: Ollama not reachable at ${c.host} - start the Ollama app`);
+  else if (m.missing.length) console.log(c.cloud ? `AI: not available on Ollama Cloud: ${m.missing.join(', ')} - pick a model tagged "vision" at ollama.com/search?c=cloud` : `AI: missing models - run: ${m.missing.map((x) => `ollama pull ${x}`).join(' && ')}`);
+  else console.log(`AI: ${c.cloud ? 'Ollama Cloud' : 'Ollama'} (${[...new Set([c.visionModel, c.textModel])].join(', ')}, embed: ${c.embedModel ? `${c.embedModel}${m.embedMissing ? ' - not available, using lexical matching' : ''}` : 'off'})`);
+  if (c.cloud && !c.apiKey) console.log('AI: OLLAMA_API_KEY is empty - Ollama Cloud requests will be rejected');
 });

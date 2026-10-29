@@ -65,7 +65,9 @@ export default function Dashboard() {
         <Link to={newTestUrl} className="btn primary">+ New test{f.semester && f.semester !== 'none' ? ` in Sem ${f.semester}` : ''}</Link>
       </div>
 
-      {!d.ai_configured && <div className="warnbox">The local AI is not ready. Start <b>Ollama</b> and pull the models listed in the server console (e.g. <span className="mono">ollama pull qwen3-vl:2b-instruct</span>) before creating a test.</div>}
+      {!d.ai_configured && (d.ai_cloud
+        ? <div className="warnbox">Ollama Cloud is not ready. Check <span className="mono">OLLAMA_API_KEY</span> and the model names in <span className="mono">.env</span>; the server console says what is wrong.</div>
+        : <div className="warnbox">The local AI is not ready. Start <b>Ollama</b> and pull the models listed in the server console (e.g. <span className="mono">ollama pull qwen3-vl:2b-instruct</span>) before creating a test.</div>)}
       {d.ai_mock && <div className="note small">Demo mode: the AI is simulated (<span className="mono">MOCK_AI=1</span>), so marks are not real.</div>}
 
       <div className="card filterbar">

@@ -145,7 +145,7 @@ async function runNode(node) {
         b.tries++;
         b.error = e.message;
         await log(node, `Batch ${b.meta?.label || b.key} try ${b.tries}/${maxTries} failed: ${e.message}`, 'error');
-        if (/Ollama is not running|not found\. Run: ollama pull|is a thinking model/.test(e.message)) b.tries = maxTries; // not retryable
+        if (/Ollama is not running|not found\. Run: ollama pull|is a thinking model|OLLAMA_API_KEY|not available on Ollama Cloud|Cannot reach Ollama Cloud/.test(e.message)) b.tries = maxTries; // not retryable
         else await new Promise((r) => setTimeout(r, Math.min(30000, node.retry_interval_seconds * 1000)));
       }
     }
@@ -233,12 +233,14 @@ export async function rerunFrom(wfId, name) {
   const busy = nodes.filter((n) => reset.has(n.name) && (n.status === 'pending' || inFlight.has(n._id)));
   if (busy.length) throw new Error(`${busy.map((n) => n.name).join(', ')} is running right now. Pause the workflow, wait for it to stop, then re-run.`);
   const t = now();
+  const done = new Set(nodes.filter((x) => x.status === 'completed' && !reset.has(x.name)).map((x) => x.name));
   for (const n of nodes.filter((x) => reset.has(x.name))) {
     const first = n.name === name;
     n.logs = [...(n.logs || []).slice(-150), { at: t, msg: first ? 'Re-run requested' : `Reset: re-running from ${name}`, level: 'info' }];
     await db.nodes.update({ _id: n._id }, {
       $set: {
-        status: first ? 'ready' : 'waiting', depends_on_inputs_current: first ? [] : n.depends_on_inputs.filter((d) => reset.has(d)),
+        // keep waiting on every input that is not finished, including ones another re-run is redoing
+        status: first ? 'ready' : 'waiting', depends_on_inputs_current: first ? [] : n.depends_on_inputs.filter((d) => !done.has(d)),
         batches: null, progress: { done: 0, total: 0 }, output: null, try_count: 0, try_at: t, error: null, skipped: false, logs: n.logs, updated_at: t,
       },
       $unset: { started_at: true, finished_at: true },

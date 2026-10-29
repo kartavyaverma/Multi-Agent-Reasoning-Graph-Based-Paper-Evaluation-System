@@ -1,6 +1,6 @@
 import { db, now } from '../../db.js';
 import { generateJson } from '../../ai/llm.js';
-import { nid, questionsOf, modelOf, unitsOf, itemsOf, upstreamError, mean, stdev, clamp, round05, JSON_RULES } from './util.js';
+import { qidMap, questionsOf, modelOf, unitsOf, itemsOf, upstreamError, mean, stdev, clamp, round05, JSON_RULES } from './util.js';
 import { unitPlan } from './student.js';
 
 const AGENTS = ['logic', 'concept', 'coverage', 'factcheck'];
@@ -104,7 +104,7 @@ Schema: {"decisions":[{"q_id":string,"fraction":number,"confidence":number,"reas
 ${block}`) }],
       mock: () => ({ decisions: batch.meta.qids.map((qid) => ({ q_id: qid, fraction: routed[qid].fraction, confidence: 0.8, reasoning: 'Mock arbiter.', feedback: 'Mock arbiter feedback.' })) }),
     });
-    return { decisions: Object.fromEntries((res.decisions || []).map((d) => [nid(d.q_id), { ...d, fraction: clamp(Number(d.fraction)), confidence: clamp(Number(d.confidence ?? 0.5)) }])) };
+    return { decisions: Object.fromEntries((res.decisions || []).map((d) => [qidMap(questionsOf(ctx))(d.q_id), { ...d, fraction: clamp(Number(d.fraction)), confidence: clamp(Number(d.confidence ?? 0.5)) }])) };
   },
 };
 

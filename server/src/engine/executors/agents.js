@@ -1,5 +1,5 @@
 import { generateJson } from '../../ai/llm.js';
-import { nid, questionsOf, modelOf, unitsOf, itemsOf, chunk, mergeChunks, JSON_RULES, clamp } from './util.js';
+import { qidMap, questionsOf, modelOf, unitsOf, itemsOf, chunk, mergeChunks, JSON_RULES, clamp } from './util.js';
 import { mockQuality } from './student.js';
 
 const AGENT_DEPS = ['transcribe_text', 'analyze_figures', 'graph_compare'];
@@ -80,7 +80,7 @@ ${evs.map(renderEvidence).join('\n\n')}`);
           };
         },
       });
-      return { evaluations: (res.evaluations || []).map((e) => ({ ...e, q_id: nid(e.q_id), fraction: clamp(Number(e.fraction)), confidence: clamp(Number(e.confidence ?? 0.6)) })) };
+      return { evaluations: (res.evaluations || []).map((e) => ({ ...e, q_id: qidMap(questionsOf(ctx))(e.q_id), fraction: clamp(Number(e.fraction)), confidence: clamp(Number(e.confidence ?? 0.6)) })) };
     },
     combine: (items) => mergeChunks(items, 'evaluations'),
   };

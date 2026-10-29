@@ -191,6 +191,13 @@ export default function TestPage() {
   const done = test.status === 'completed';
   const active = tab || (done ? 'overview' : 'pipeline');
   const act = (p) => async () => { await api.post(`/tests/${id}/${p}`); load(); };
+  // re-runs the whole evaluation from the first step (marks and any teacher edits are recalculated)
+  const reEvaluate = async () => {
+    const first = data.nodes.find((n) => !n.depends_on?.length);
+    if (!first || !window.confirm('Re-evaluate every student from the start? All marks are recalculated and marks you changed by hand on this test are replaced.')) return;
+    try { await api.post(`/tests/${id}/nodes/${first.id}/rerun`); setTab('pipeline'); load(); } catch (e) { window.alert(e.message); }
+  };
+  const busyRun = data.workflow?.status === 'running';
 
   return (
     <>
@@ -203,6 +210,7 @@ export default function TestPage() {
         <div className="flex">
           {test.files?.has_question_paper && <a className="btn sm" href={api.fileUrl(`/tests/${id}/files/question_paper`)} target="_blank" rel="noreferrer">Question paper</a>}
           {test.files?.has_model_answer && <a className="btn sm" href={api.fileUrl(`/tests/${id}/files/model_answer`)} target="_blank" rel="noreferrer">Model answer</a>}
+          {data.workflow && <button className="btn sm" onClick={reEvaluate} disabled={busyRun} title={busyRun ? 'Already evaluating' : 'Run the whole evaluation again'}>↻ Re-evaluate</button>}
           <button className="btn sm" onClick={() => setEditing(true)}>Edit details</button>
           {data.workflow && <Link className="btn sm" to={`/tests/${id}/workflow`}>Workflow</Link>}
           <button className="btn sm danger" onClick={async () => { if (window.confirm('Delete this test and all its results?')) { await api.del(`/tests/${id}`); nav('/'); } }}>Delete</button>
