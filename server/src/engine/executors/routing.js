@@ -1,7 +1,6 @@
-import { config } from '../../config.js';
 import { db, now } from '../../db.js';
 import { generateJson } from '../../ai/llm.js';
-import { nid, questionsOf, modelOf, unitsOf, itemsOf, upstreamError, mean, stdev, clamp, round05, W, JSON_RULES } from './util.js';
+import { qidMap, questionsOf, modelOf, unitsOf, itemsOf, upstreamError, mean, stdev, clamp, round05, JSON_RULES } from './util.js';
 import { unitPlan } from './student.js';
 
 const AGENTS = ['logic', 'concept', 'coverage', 'factcheck'];
@@ -23,7 +22,9 @@ export function maxTotal(questions, rules = []) {
 /* ───────────── Confidence router (sync) ───────────── */
 export const confidenceRouter = {
   async run(ctx) {
-    const { highConfidence, lowConfidence } = config.grading;
+    const { highConfidence, lowConfidence, weights: W } = ctx.grading;
+    // agents switched off in the workflow settings are left out of the panel, not counted as missing
+    const active = AGENTS.filter((k) => !ctx.out(AGENT_NODE[k])?.skipped);
     const model = modelOf(ctx);
     const items = {};
     for (const u of unitsOf(ctx)) {
@@ -36,14 +37,14 @@ export const confidenceRouter = {
       for (const a of tr.answers) {
         if (!a.attempted) { questions[a.q_id] = { route: 'unattempted', fraction: 0, confidence: 1 }; continue; }
         const agents = {};
-        for (const k of AGENTS) {
+        for (const k of active) {
           const e = (itemsOf(ctx, AGENT_NODE[k])[id]?.evaluations || []).find((x) => x.q_id === a.q_id);
           if (e) agents[k] = e;
         }
         const present = Object.keys(agents);
         if (!present.length) { questions[a.q_id] = { route: 'review', reason: 'No agent produced an evaluation', fraction: 0, confidence: 0, agents }; continue; }
         const wsum = present.reduce((s, k) => s + W[k], 0);
-        const fraction = present.reduce((s, k) => s + W[k] * agents[k].fraction, 0) / wsum;
+        const fraction = wsum > 0 ? present.reduce((s, k) => s + W[k] * agents[k].fraction, 0) / wsum : mean(present.map((k) => agents[k].fraction));
         const spread = stdev(present.map((k) => agents[k].fraction));
         const agreement = clamp(1 - spread / 0.5);
         let conf = mean(present.map((k) => agents[k].confidence)) * (0.25 + 0.75 * agreement);
@@ -55,7 +56,7 @@ export const confidenceRouter = {
         const fig = (itemsOf(ctx, 'analyze_figures')[id]?.figures || []).find((f) => f.q_id === a.q_id);
         if (fig?.figure_present) conf *= 0.7 + 0.3 * (fig.confidence ?? 0.7);
         if (model[a.q_id]?.missing_in_model) { conf *= 0.8; reasons.push('question missing from model answer'); }
-        if (present.length < AGENTS.length) { conf *= 0.9; reasons.push('not all agents responded'); }
+        if (present.length < active.length) { conf *= 0.9; reasons.push('not all agents responded'); }
         conf = clamp(conf);
         const route = conf >= highConfidence ? 'auto' : conf >= lowConfidence ? 're_evaluate' : 'review';
         questions[a.q_id] = { route, fraction, spread, agreement, confidence: conf, reason: reasons.join('; '), agents };
@@ -97,14 +98,13 @@ Why flagged: ${r.reason || 'low overall confidence'}`;
     }).join('\n\n');
     const res = await generateJson({
       task: `arbiter:${id}`,
-      parts: [{ text: `You are the SENIOR EXAMINER resolving cases where a panel of four automatic graders (logic, concept, coverage, fact-check) were unsure or disagreed. Re-read each answer against the marking scheme from scratch, weigh the panel's arguments critically (they may be wrong), and decide the final fraction of full marks (0-1) the answer deserves. Give a concise justification a teacher can verify, and your confidence (0-1). If you still cannot decide reliably (e.g. ambiguous answer, doubtful transcription), give low confidence so a human reviews it.
-${JSON_RULES}
+      parts: [{ text: ctx.prompt('re_evaluate', `${JSON_RULES}
 Schema: {"decisions":[{"q_id":string,"fraction":number,"confidence":number,"reasoning":string,"feedback":string}]}
 
-${block}` }],
+${block}`) }],
       mock: () => ({ decisions: batch.meta.qids.map((qid) => ({ q_id: qid, fraction: routed[qid].fraction, confidence: 0.8, reasoning: 'Mock arbiter.', feedback: 'Mock arbiter feedback.' })) }),
     });
-    return { decisions: Object.fromEntries((res.decisions || []).map((d) => [nid(d.q_id), { ...d, fraction: clamp(Number(d.fraction)), confidence: clamp(Number(d.confidence ?? 0.5)) }])) };
+    return { decisions: Object.fromEntries((res.decisions || []).map((d) => [qidMap(questionsOf(ctx))(d.q_id), { ...d, fraction: clamp(Number(d.fraction)), confidence: clamp(Number(d.confidence ?? 0.5)) }])) };
   },
 };
 
@@ -144,7 +144,7 @@ export const finalizeMarks = {
           const d = arbiter[id]?.decisions?.[q.id];
           if (d) {
             fraction = d.fraction; confidence = d.confidence; reasoning = d.reasoning; extraFeedback = d.feedback;
-            status = d.confidence >= config.grading.arbiterAccept ? 'reevaluated' : 'review';
+            status = d.confidence >= ctx.grading.arbiterAccept ? 'reevaluated' : 'review';
           } else status = 'review';
         }
         const agents = rt.agents || {};

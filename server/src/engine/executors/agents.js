@@ -1,28 +1,10 @@
-import { config } from '../../config.js';
 import { generateJson } from '../../ai/llm.js';
-import { nid, questionsOf, modelOf, unitsOf, itemsOf, chunk, mergeChunks, JSON_RULES, clamp } from './util.js';
+import { qidMap, questionsOf, modelOf, unitsOf, itemsOf, chunk, mergeChunks, JSON_RULES, clamp } from './util.js';
 import { mockQuality } from './student.js';
 
 const AGENT_DEPS = ['transcribe_text', 'analyze_figures', 'graph_compare'];
 
-const ROLES = {
-  logic: {
-    title: 'LOGIC AGENT',
-    focus: `Judge the REASONING FLOW. Is the answer organised in a valid order? Does each step follow from the previous one? Are derivations/calculations internally consistent (apply "error carried forward": a wrong early value followed by correct method still earns method credit)? Are there logical jumps, circular statements, contradictions or irrelevant detours? For numerical/derivation questions check each line of working.`,
-  },
-  concept: {
-    title: 'CONCEPT AGENT',
-    focus: `Judge CONCEPTUAL CORRECTNESS and depth. Are definitions and principles right? Does the student actually understand (vs. reciting keywords)? Identify misconceptions, confusion between related ideas, and correct-but-differently-worded understanding. Credit valid alternative explanations listed in the scheme or evidently correct.`,
-  },
-  coverage: {
-    title: 'COVERAGE AGENT',
-    focus: `Judge COMPLETENESS against the marking scheme. Go through every key point one by one and decide whether the student covered it fully, partially (half credit) or not at all; use the reasoning-graph comparison (missing nodes) as supporting evidence but verify it yourself since it is automatic. Report which key point ids were fully/partially covered.`,
-  },
-  factcheck: {
-    title: 'FACT-CHECK AGENT',
-    focus: `Judge FACTUAL ACCURACY independently of the model answer's wording: check every formula, number, unit, name, date, symbol, and statement the student made against established knowledge in the subject. The model answer may be incomplete, so a correct fact absent from it is NOT an error. Also assess the student's figure (if any) for factual/technical correctness using the figure evaluation provided. Penalise wrong facts, missing/incorrect units, and wrong values.`,
-  },
-};
+const AGENT_NODE = { logic: 'agent_logic', concept: 'agent_concept', coverage: 'agent_coverage', factcheck: 'agent_factcheck' };
 
 function evidenceFor(ctx, unitId, qid) {
   const q = questionsOf(ctx).find((x) => x.id === qid);
@@ -58,11 +40,10 @@ function renderEvidence(ev) {
 }
 
 function makeAgent(role) {
-  const R = ROLES[role];
   return {
     concurrency: 2,
     plan(ctx) {
-      const per = config.grading.questionsPerCall;
+      const per = ctx.grading.questionsPerCall;
       const batches = [];
       const tr = itemsOf(ctx, 'transcribe_text');
       for (const u of unitsOf(ctx)) {
@@ -79,23 +60,12 @@ function makeAgent(role) {
       if (!batch.meta.qids.length) return { evaluations: [] };
       const unitId = batch.key.split('::')[0];
       const evs = batch.meta.qids.map((qid) => evidenceFor(ctx, unitId, qid));
-      const text = `You are the ${R.title} in a panel of independent examiners grading ONE student's answers. Other agents judge other aspects; do not try to cover their job - but your final mark fraction must still reflect the answer's overall deserved credit as seen through your lens.
-
-YOUR FOCUS: ${R.focus}
-
-GRADING RULES:
-- "fraction" = marks the answer deserves ÷ maximum marks for that question (0.0-1.0). Use finer steps than 0.25 when justified.
-- Blank, irrelevant or entirely wrong answers get 0. Do not reward length, neat handwriting or keyword-stuffing. Do not penalise correct answers that are worded differently from the model answer.
-- Be consistent: the same quality of answer must always get the same fraction.
-- "confidence" (0-1) = how sure you are of YOUR fraction. Lower it when the transcription is unclear (low legibility), the question is ambiguous, the answer is partially correct in a way hard to judge, or evidence conflicts.
-- "feedback" = 1-3 sentences addressed to the student, specific (what was right, what was missing/wrong, how to fix).
-- "issues" = short list of concrete problems; "strengths" = short list of what was good.
-${role === 'coverage' ? '- "key_points_covered": ids of key points fully covered; "key_points_partial": ids partially covered.' : ''}
+      const text = ctx.prompt(AGENT_NODE[role], `${role === 'coverage' ? '- "key_points_covered": ids of key points fully covered; "key_points_partial": ids partially covered.' : ''}
 ${JSON_RULES}
 
 Schema: {"evaluations":[{"q_id":string,"fraction":number,"confidence":number,"feedback":string,"strengths":[string],"issues":[string]${role === 'coverage' ? ',"key_points_covered":[string],"key_points_partial":[string]' : ''}}]}
 
-${evs.map(renderEvidence).join('\n\n')}`;
+${evs.map(renderEvidence).join('\n\n')}`);
       const res = await generateJson({
         task: `agent:${role}:${batch.key}`, parts: [{ text }], temperature: 0.1,
         mock: () => {
@@ -110,7 +80,7 @@ ${evs.map(renderEvidence).join('\n\n')}`;
           };
         },
       });
-      return { evaluations: (res.evaluations || []).map((e) => ({ ...e, q_id: nid(e.q_id), fraction: clamp(Number(e.fraction)), confidence: clamp(Number(e.confidence ?? 0.6)) })) };
+      return { evaluations: (res.evaluations || []).map((e) => ({ ...e, q_id: qidMap(questionsOf(ctx))(e.q_id), fraction: clamp(Number(e.fraction)), confidence: clamp(Number(e.confidence ?? 0.6)) })) };
     },
     combine: (items) => mergeChunks(items, 'evaluations'),
   };

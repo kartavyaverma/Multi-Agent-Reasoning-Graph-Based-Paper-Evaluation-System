@@ -54,3 +54,79 @@ export function Modal({ title, onClose, children }) {
     </div>
   );
 }
+
+export function Switch({ checked, onChange, disabled, label, title }) {
+  return (
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} title={title} disabled={disabled}
+      className={`switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}><i /></button>
+  );
+}
+
+/** Small confirmation dialog. opts: { title, body, confirm, danger, onConfirm } */
+export function ConfirmDialog({ opts, onClose }) {
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => {
+    const k = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', k);
+    return () => window.removeEventListener('keydown', k);
+  }, [onClose]);
+  if (!opts) return null;
+  const go = async () => {
+    setBusy(true);
+    try { await opts.onConfirm(); onClose(); } finally { setBusy(false); }
+  };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="dialog" role="alertdialog" aria-label={opts.title} onClick={(e) => e.stopPropagation()}>
+        <h2>{opts.title}</h2>
+        <div className="muted">{opts.body}</div>
+        <div className="flex" style={{ justifyContent: 'flex-end', marginTop: 20 }}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className={`btn ${opts.danger ? 'danger-fill' : 'primary'}`} onClick={go} disabled={busy} autoFocus>{busy ? 'Working…' : opts.confirm || 'Confirm'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function Toast({ toast }) {
+  if (!toast) return null;
+  return <div className={`toast t-${toast.kind || 'ok'}`} role="status">{toast.msg}</div>;
+}
+
+/* ───────────── academic terms ───────────── */
+/** Academic year that is running now, e.g. "2026-27" (years start in June). */
+export function currentAcademicYear(d = new Date()) {
+  const y = d.getMonth() >= 5 ? d.getFullYear() : d.getFullYear() - 1;
+  return `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+}
+export const yearOptions = (extra = []) => {
+  const y0 = Number(currentAcademicYear().slice(0, 4));
+  const list = [1, 0, -1, -2, -3].map((d) => `${y0 + d}-${String((y0 + d + 1) % 100).padStart(2, '0')}`);
+  return [...new Set([...list, ...extra.filter(Boolean)])].sort().reverse();
+};
+export const SEMESTERS = [1, 2, 3, 4, 5, 6, 7, 8];
+export const fmtTerm = (year, sem) => [year, sem ? `Sem ${sem}` : null].filter(Boolean).join(' · ') || 'No term';
+
+export function TermBadge({ year, sem }) {
+  if (!year && !sem) return <span className="term none">No term</span>;
+  return <span className="term">{year && <b>{year}</b>}{sem ? <span>Sem {sem}</span> : null}</span>;
+}
+
+/** Tiny trend line for a list of percentages. */
+export function Sparkline({ values = [], width = 72, height = 22 }) {
+  if (values.length < 2) return <span className="muted small">-</span>;
+  const pts = values.map((v, i) => [(i / (values.length - 1)) * (width - 4) + 2, height - 2 - (Math.max(0, Math.min(100, v)) / 100) * (height - 4)]);
+  const d = values[values.length - 1] - values[0];
+  return (
+    <svg width={width} height={height} className={`spark ${d > 0 ? 'up' : d < 0 ? 'down' : ''}`} aria-label={`Trend ${values.join(', ')}%`}>
+      <polyline points={pts.map((p) => p.join(',')).join(' ')} fill="none" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="2.4" />
+    </svg>
+  );
+}
+
+export function Delta({ v }) {
+  if (v == null) return null;
+  return <span className={`delta ${v > 0 ? 'up' : v < 0 ? 'down' : ''}`}>{v > 0 ? '▲' : v < 0 ? '▼' : '•'} {Math.abs(v)}%</span>;
+}

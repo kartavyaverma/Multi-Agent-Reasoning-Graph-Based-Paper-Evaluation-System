@@ -7,9 +7,12 @@ import { db, now } from './db.js';
 import { config } from './config.js';
 import { checkModels, aiActivity } from './ai/llm.js';
 import { requireAuth } from './auth.js';
-import { createWorkflow, retryNode, stopWorkflow, resumeWorkflow } from './engine/engine.js';
+import { createWorkflow, retryNode, stopWorkflow, resumeWorkflow, rerunFrom } from './engine/engine.js';
+import { defaultGrading, resolveGrading, sanitizeSteps, nodeSet, stepOf } from './engine/settings.js';
+import { sanitizePrompts, promptList, promptState, sanitizeLibrary } from './engine/prompts.js';
 import { PAPER_CHECK_TEMPLATE_ID } from './engine/templates.js';
 import { testAnalytics, subjectTrend, gradeOf } from './analytics.js';
+import { dashboard, studentList, studentProfile, studentKey, termOf } from './insights.js';
 import { readQuestionPaper } from './engine/executors/parse.js';
 import { executors } from './engine/executors/index.js';
 import os from 'node:os';
@@ -79,21 +82,19 @@ api.delete('/subjects/:id', h(async (req, res) => {
 
 /* ───────────── dashboard ───────────── */
 api.get('/dashboard', h(async (req, res) => {
-  const tests = await db.tests.find({ user_id: req.user._id }, { sort: { created_at: -1 } });
-  const subjects = await db.subjects.find({ user_id: req.user._id });
-  const sname = Object.fromEntries(subjects.map((s) => [s._id, s.name]));
-  const recent = [];
-  let students = 0, review = 0, weighted = 0;
-  for (const t of tests) {
-    const a = testAnalytics(await db.results.find({ test_id: t._id }));
-    students += a.students; review += a.needs_review; weighted += a.average * a.graded;
-    if (recent.length < 8) recent.push({ ...t, subject_name: sname[t.subject_id], analytics: { average: a.average, students: a.students, pass_rate: a.pass_rate, needs_review: a.needs_review } });
-  }
-  res.json({
-    totals: { subjects: subjects.length, tests: tests.length, students, needs_review: review, running: tests.filter((t) => t.status === 'processing').length, average: students ? Math.round((weighted / students) * 10) / 10 : 0 },
-    recent,
-    ai_configured: config.ai.mock || (await checkModels()).ok,
-  });
+  const d = await dashboard(req.user._id, req.query);
+  res.json({ ...d, ai_configured: config.ai.mock || (await checkModels()).ok, ai_mock: config.ai.mock, ai_cloud: config.ai.cloud });
+}));
+
+/* ───────────── students across tests ───────────── */
+api.get('/students', h(async (req, res) => {
+  res.json({ students: await studentList(req.user._id, req.query) });
+}));
+
+api.get('/students/:key', h(async (req, res) => {
+  const p = await studentProfile(req.user._id, req.params.key);
+  if (!p) return res.status(404).json({ error: 'Student not found' });
+  res.json(p);
 }));
 
 
@@ -102,7 +103,7 @@ const previewUpload = multer({ dest: path.join(os.tmpdir(), 'papercheck-preview'
 api.post('/preview/questions', previewUpload.single('question_paper'), h(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Choose a question paper file first' });
   try {
-    const r = await readQuestionPaper({ path: req.file.path, mime: mimeOf(req.file) });
+    const r = await readQuestionPaper({ path: req.file.path, mime: mimeOf(req.file) }, req.user.workflow_defaults?.prompts);
     res.json({ questions: r.questions.map((q) => ({ id: q.id, text: q.text, marks: q.marks, has_figure: !!q.has_figure, type: q.type, choice_group: q.choice_group || null })), choice_rules: r.choice_rules || [], total_marks: r.total_marks });
   } finally { fs.rmSync(req.file.path, { force: true }); }
 }));
@@ -163,7 +164,7 @@ api.post('/tests', (req, res, next) => { req.testId = crypto.randomBytes(8).toSt
     const t = now();
     const test = await db.tests.insert({
       _id: req.testId, user_id: req.user._id, subject_id: subject._id, title: title.trim(), status: 'processing',
-      student_count: pps ? null : files.students.length, pages_per_student: pps || null,
+      ...termOf(req.body), student_count: pps ? null : files.students.length, pages_per_student: pps || null,
       total_marks_override: Number(total_marks) > 0 ? Number(total_marks) : null, files, manual_questions: !!manual, created_at: t,
     });
     const wf = await createWorkflow({
@@ -173,6 +174,7 @@ api.post('/tests', (req, res, next) => { req.testId = crypto.randomBytes(8).toSt
         student_files: files.students, pages_per_student: pps || null, total_marks_override: test.total_marks_override,
         manual_questions: manual, choice_rules,
       },
+      settings: req.user.workflow_defaults,
     });
     await db.tests.update({ _id: test._id }, { $set: { workflow_id: wf._id } });
     res.json({ test: { ...test, workflow_id: wf._id } });
@@ -231,6 +233,8 @@ api.get('/tests/:id/workflow', h(async (req, res) => {
       depends_on: n.depends_on_inputs, depends_on_current: n.depends_on_inputs_current || [],
       progress: n.progress, error: n.error || null, try_count: n.try_count || 0, max_try_count: n.max_try_count, try_at: n.try_at,
       started_at: n.started_at || null, finished_at: n.finished_at || null, fan_out: !!executors[n.type]?.plan,
+      optional: stepOf(n).optional, enabled: n.config?.enabled !== false, skipped: !!n.skipped,
+      concurrency: stepOf(n).concurrency, retry_interval_seconds: n.retry_interval_seconds, prompt: promptState(wf.settings?.prompts, n.name),
       batches: (n.batches || []).map((b) => ({ key: b.key, label: b.meta?.label || b.key, status: b.status, failed: !!b.failed, tries: b.tries, error: b.error, started_at: b.started_at || null, finished_at: b.finished_at || null })),
       logs: n.logs || [],
     })),
@@ -258,7 +262,7 @@ api.get('/tests/:id/workflow/nodes/:nodeId/:part(input|output|config)', h(async 
   const exec = executors[n.type] || {};
   let data;
   if (req.params.part === 'config') {
-    data = { name: n.name, type: n.type, description: n.description, depends_on_inputs: n.depends_on_inputs, max_try_count: n.max_try_count, retry_interval_seconds: n.retry_interval_seconds, fan_out_per_student: !!exec.plan, batch_concurrency: exec.plan ? exec.concurrency || 3 : null, config: n.config, ai_model: config.ai.mock ? 'mock' : config.ai.visionModel };
+    data = { name: n.name, type: n.type, description: n.description, depends_on_inputs: n.depends_on_inputs, max_try_count: n.max_try_count, retry_interval_seconds: n.retry_interval_seconds, fan_out_per_student: !!exec.plan, batch_concurrency: stepOf(n).concurrency, config: n.config, grading: resolveGrading(wf.settings?.grading), ai_model: config.ai.mock ? 'mock' : config.ai.visionModel };
   } else if (req.params.part === 'input') {
     data = n.depends_on_inputs.length ? Object.fromEntries(n.depends_on_inputs.map((d) => [d, wf.output?.[d] ?? null])) : { workflow_input: wf.input };
   } else if (n.status === 'completed') {
@@ -270,6 +274,77 @@ api.get('/tests/:id/workflow/nodes/:nodeId/:part(input|output|config)', h(async 
   res.json({ part: req.params.part, node: n.name, data: clip(data) });
 }));
 
+/* ───────────── workflow settings ───────────── */
+const settingsOf = async (wf, user) => {
+  const nodes = await db.nodes.find({ workflow_id: wf._id }, { sort: { created_at: 1 } });
+  return { grading: resolveGrading(wf.settings?.grading), defaults: defaultGrading(), steps: nodes.map(stepOf), prompts: promptList(wf.settings?.prompts), has_user_defaults: !!user.workflow_defaults };
+};
+
+/** Validates { grading, steps } from the client; anything missing from the body keeps its current value. */
+const parseSettings = (body, nodes, grading = {}, prompts = {}) => {
+  const current = Object.fromEntries(nodes.map((n) => [n.name, stepOf(n)]));
+  const steps = sanitizeSteps(Object.fromEntries(nodes.map((n) => [n.name, { ...current[n.name], ...(body?.steps?.[n.name] || {}) }])), nodes.map((n) => n.name));
+  const g = body?.grading || {};
+  const p = { ...prompts };
+  for (const [id, v] of Object.entries(body?.prompts || {})) p[id] = { ...(prompts[id] || {}), ...v };
+  return { grading: resolveGrading({ ...grading, ...g, weights: { ...grading.weights, ...g.weights } }), steps, prompts: sanitizePrompts(p) };
+};
+
+api.get('/tests/:id/workflow/settings', h(async (req, res) => {
+  const test = await ownedTest(req);
+  const wf = test?.workflow_id && (await db.workflows.findOne({ _id: test.workflow_id }, { output: 0, input: 0 }));
+  if (!wf) return res.status(404).json({ error: 'Workflow not found' });
+  res.json(await settingsOf(wf, req.user));
+}));
+
+api.put('/tests/:id/workflow/settings', h(async (req, res) => {
+  const test = await ownedTest(req);
+  const wf = test?.workflow_id && (await db.workflows.findOne({ _id: test.workflow_id }, { output: 0, input: 0 }));
+  if (!wf) return res.status(404).json({ error: 'Workflow not found' });
+  const nodes = await db.nodes.find({ workflow_id: wf._id });
+  let s;
+  try { s = parseSettings(req.body, nodes, resolveGrading(wf.settings?.grading), wf.settings?.prompts); } catch (e) { return res.status(400).json({ error: e.message }); }
+  await db.workflows.update({ _id: wf._id }, { $set: { 'settings.grading': s.grading, 'settings.prompts': s.prompts, updated_at: now() } });
+  for (const n of nodes) {
+    const set = nodeSet(n, s.steps[n.name]);
+    if (Object.keys(set).length) await db.nodes.update({ _id: n._id }, { $set: set });
+  }
+  res.json(await settingsOf({ ...wf, settings: { grading: s.grading, prompts: s.prompts } }, req.user));
+}));
+
+// The teacher's defaults, applied to every new test.
+api.put('/workflow-defaults', h(async (req, res) => {
+  const tpl = await db.workflow_templates.findOne({ _id: PAPER_CHECK_TEMPLATE_ID });
+  let s;
+  try { s = parseSettings(req.body, tpl.nodes.map((n) => ({ ...n, config: {} }))); } catch (e) { return res.status(400).json({ error: e.message }); }
+  await db.users.update({ _id: req.user._id }, { $set: { workflow_defaults: s } });
+  res.json({ ok: true });
+}));
+
+// reusable prompt snippets, shared across tests and steps
+api.get('/prompt-library', h(async (req, res) => res.json({ items: req.user.prompt_library || [] })));
+
+api.put('/prompt-library', h(async (req, res) => {
+  const items = sanitizeLibrary(req.body?.items);
+  await db.users.update({ _id: req.user._id }, { $set: { prompt_library: items } });
+  res.json({ items });
+}));
+
+api.delete('/workflow-defaults', h(async (req, res) => {
+  await db.users.update({ _id: req.user._id }, { $unset: { workflow_defaults: true } });
+  res.json({ ok: true });
+}));
+
+api.post('/tests/:id/nodes/:nodeId/rerun', h(async (req, res) => {
+  const t = await ownedTest(req);
+  const n = t && (await db.nodes.findOne({ _id: req.params.nodeId, workflow_id: t.workflow_id }));
+  if (!n) return res.status(404).json({ error: 'Node not found' });
+  let reset;
+  try { reset = await rerunFrom(t.workflow_id, n.name); } catch (e) { return res.status(409).json({ error: e.message }); }
+  await db.tests.update({ _id: t._id }, { $set: { status: 'processing' }, $unset: { completed_at: true } });
+  res.json({ ok: true, reset });
+}));
+
 const removeTest = async (t) => {
   if (t.workflow_id) {
     await db.nodes.remove({ workflow_id: t.workflow_id }, { multi: true });
@@ -279,6 +354,20 @@ const removeTest = async (t) => {
   await db.tests.remove({ _id: t._id });
   cleanup(t._id);
 };
+
+// rename a test or move it to another academic year / semester
+api.put('/tests/:id', h(async (req, res) => {
+  const t = await ownedTest(req);
+  if (!t) return res.status(404).json({ error: 'Test not found' });
+  const set = termOf({ academic_year: t.academic_year, semester: t.semester, ...req.body });
+  if (req.body?.title !== undefined) {
+    const title = String(req.body.title).trim();
+    if (!title) return res.status(400).json({ error: 'Test name is required' });
+    set.title = title.slice(0, 200);
+  }
+  await db.tests.update({ _id: t._id }, { $set: set });
+  res.json({ test: { ...t, ...set } });
+}));
 
 api.delete('/tests/:id', h(async (req, res) => {
   const t = await ownedTest(req);
@@ -315,7 +404,7 @@ api.post('/tests/:id/nodes/:nodeId/retry', h(async (req, res) => {
 
 /* ───────────── results & analytics ───────────── */
 const light = (r) => ({
-  id: r._id, unit_id: r.unit_id, name: r.name, roll_no: r.roll_no, status: r.status, error: r.error || null,
+  id: r._id, unit_id: r.unit_id, student_key: studentKey(r), name: r.name, roll_no: r.roll_no, status: r.status, error: r.error || null,
   total: r.total, max_total: r.max_total, percentage: r.percentage, grade: r.percentage != null ? gradeOf(r.percentage) : null,
   review_count: r.review_count, questions: (r.questions || []).map((q) => ({ q_id: q.q_id, marks: q.marks, max: q.max, status: q.status, counted: q.counted })),
 });
@@ -338,7 +427,7 @@ api.get('/tests/:id/results/:rid', h(async (req, res) => {
   if (!r) return res.status(404).json({ error: 'Result not found' });
   const all = await db.results.find({ test_id: t._id });
   const ranked = all.filter((x) => x.total != null).sort((a, b) => b.total - a.total);
-  res.json({ result: { ...r, grade: r.percentage != null ? gradeOf(r.percentage) : null }, test: { id: t._id, title: t.title }, rank: ranked.findIndex((x) => x._id === r._id) + 1, class_size: ranked.length, class_average: testAnalytics(all).average });
+  res.json({ result: { ...r, grade: r.percentage != null ? gradeOf(r.percentage) : null, student_key: studentKey(r) }, test: { id: t._id, title: t.title, academic_year: t.academic_year || null, semester: t.semester || null }, rank: ranked.findIndex((x) => x._id === r._id) + 1, class_size: ranked.length, class_average: testAnalytics(all).average });
 }));
 
 api.put('/tests/:id/results/:rid/questions/:qid', h(async (req, res) => {
@@ -374,6 +463,54 @@ api.get('/tests/:id/export.csv', h(async (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="${t.title.replace(/[^\w]+/g, '_')}_results.csv"`);
   res.send(lines.join('\n'));
+}));
+
+/* ───────────── answer-sheet pages as images (marked-script view) ───────────── */
+const pageJobs = new Map(); // unit path -> promise of page files, so concurrent requests render once
+
+/** Renders a student's script to PNG pages once and caches them under uploads/<test>/pages/. */
+async function unitPages(t, unitId) {
+  const wf = await db.workflows.findOne({ _id: t.workflow_id });
+  const u = wf?.output?.ingest?.units?.find((x) => x.unit_id === unitId);
+  if (!u || !fs.existsSync(u.path)) return null;
+  if (u.mime !== 'application/pdf') return [{ path: u.path, mime: u.mime }];
+  const dir = path.join(config.dataDir, 'uploads', t._id, 'pages');
+  const prefix = `${unitId.replace(/[^\w-]/g, '')}-`;
+  const cached = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.startsWith(prefix)).sort((a, b) => parseInt(a.slice(prefix.length), 10) - parseInt(b.slice(prefix.length), 10)) : [];
+  if (cached.length) return cached.map((f) => ({ path: path.join(dir, f), mime: 'image/png' }));
+  if (!pageJobs.has(u.path)) {
+    pageJobs.set(u.path, (async () => {
+      const { pdf } = await import('pdf-to-img');
+      fs.mkdirSync(dir, { recursive: true });
+      const out = [];
+      let i = 0;
+      for await (const img of await pdf(u.path, { scale: 1.6 })) {
+        const p = path.join(dir, `${prefix}${++i}.png`);
+        fs.writeFileSync(p, img);
+        out.push({ path: p, mime: 'image/png' });
+        if (i >= 60) break;
+      }
+      return out;
+    })().finally(() => pageJobs.delete(u.path)));
+  }
+  return pageJobs.get(u.path);
+}
+
+api.get('/tests/:id/units/:unit/pages', h(async (req, res) => {
+  const t = await ownedTest(req);
+  const pages = t && (await unitPages(t, req.params.unit));
+  if (!pages) return res.status(404).json({ error: 'Answer sheet not found' });
+  res.json({ count: pages.length });
+}));
+
+api.get('/tests/:id/units/:unit/pages/:n', h(async (req, res) => {
+  const t = await ownedTest(req);
+  const pages = t && (await unitPages(t, req.params.unit));
+  const p = pages?.[Number(req.params.n) - 1];
+  if (!p) return res.status(404).json({ error: 'Page not found' });
+  res.setHeader('Content-Type', p.mime);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.sendFile(path.resolve(p.path));
 }));
 
 /* ───────────── original scans (for verifying OCR) ───────────── */

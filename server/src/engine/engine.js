@@ -1,6 +1,8 @@
 import { db, now } from '../db.js';
 import { config } from '../config.js';
 import { executors } from './executors/index.js';
+import { resolveGrading, sanitizeSteps, nodeSet, stepMeta } from './settings.js';
+import { buildPrompt, sanitizePrompts } from './prompts.js';
 
 /**
  * Node-based workflow engine (see WORKFLOW_SYSTEM_GUIDE.md).
@@ -13,17 +15,20 @@ import { executors } from './executors/index.js';
 const inFlight = new Set();
 let timer = null;
 
-export async function createWorkflow({ template_id, org_id, application_id, reference_id, input }) {
+/** settings: optional { grading, steps } (the teacher's saved defaults), applied to the new workflow. */
+export async function createWorkflow({ template_id, org_id, application_id, reference_id, input, settings }) {
   const tpl = await db.workflow_templates.findOne({ _id: template_id });
   if (!tpl) throw new Error(`Unknown template ${template_id}`);
   const t = now();
+  let steps = {};
+  try { steps = sanitizeSteps(settings?.steps || {}, tpl.nodes.map((n) => n.name)); } catch { /* invalid saved defaults: ignore */ }
   const wf = await db.workflows.insert({
     template_id, org_id, application_id, reference_id, status: 'running',
-    input, output: {}, created_at: t, updated_at: t,
+    input, output: {}, settings: { grading: settings?.grading || {}, prompts: sanitizePrompts(settings?.prompts) }, created_at: t, updated_at: t,
   });
   let order = 0;
   for (const n of tpl.nodes) {
-    await db.nodes.insert({
+    const node = await db.nodes.insert({
       workflow_id: wf._id, org_id, application_id,
       name: n.name, type: n.type, label: n.label, description: n.description,
       status: n.depends_on_inputs.length ? 'waiting' : 'ready',
@@ -34,6 +39,8 @@ export async function createWorkflow({ template_id, org_id, application_id, refe
       try_count: 0, max_try_count: n.max_try_count ?? 3, retry_interval_seconds: n.retry_interval_seconds ?? 20,
       try_at: t, logs: [], created_at: t + order++, updated_at: t,
     });
+    const set = nodeSet(node, steps[n.name]);
+    if (Object.keys(set).length) await db.nodes.update({ _id: node._id }, { $set: set });
   }
   return wf;
 }
@@ -93,7 +100,14 @@ async function runNode(node) {
   }
   const exec = executors[node.type];
   if (!exec) throw new Error(`No executor for node type ${node.type}`);
-  const ctx = { wf, node, input: wf.input, out: (name) => wf.output?.[name], log: (m) => log(node, m) };
+  const missing = stepMeta(node.name).requires.find((r) => wf.output?.[r]?.skipped);
+  if (node.config?.enabled === false || missing) {
+    await log(node, missing ? `Skipped: needs ${missing}, which was switched off` : 'Skipped: switched off in workflow settings');
+    await db.nodes.update({ _id: node._id }, { $set: { skipped: true } });
+    return completeNode(node, { skipped: true, items: {} });
+  }
+  const ctx = { wf, node, input: wf.input, out: (name) => wf.output?.[name], log: (m) => log(node, m), grading: resolveGrading(wf.settings?.grading),
+    prompt: (id, tail) => buildPrompt(id, wf.settings?.prompts, tail) };
   await log(node, node.batches ? 'Node execution resumed' : `Node execution started (try ${(node.try_count || 0) + 1}/${node.max_try_count})`);
 
   if (!exec.plan) {
@@ -101,16 +115,17 @@ async function runNode(node) {
     return completeNode(node, output);
   }
 
+  const concurrency = node.config?.concurrency || exec.concurrency || 3;
   if (!node.batches) {
     const plan = await exec.plan(ctx);
     node.batches = plan.map((p, index) => ({ index, key: p.key, meta: p.meta || null, status: 'pending', tries: 0, output: null, error: null }));
     node.progress = { done: 0, total: node.batches.length };
-    await log(node, `Planned ${node.batches.length} batch(es), up to ${exec.concurrency || 3} at a time`);
+    await log(node, `Planned ${node.batches.length} batch(es), up to ${concurrency} at a time`);
     await db.nodes.update({ _id: node._id }, { $set: { batches: node.batches, progress: node.progress } });
   }
 
   const todo = node.batches.filter((b) => b.status !== 'completed');
-  await runPool(todo, exec.concurrency || 3, async (b) => {
+  await runPool(todo, concurrency, async (b) => {
     // stop early if the workflow was stopped
     const cur = await db.workflows.findOne({ _id: node.workflow_id }, { status: 1 });
     if (!cur || cur.status !== 'running') return;
@@ -130,7 +145,7 @@ async function runNode(node) {
         b.tries++;
         b.error = e.message;
         await log(node, `Batch ${b.meta?.label || b.key} try ${b.tries}/${maxTries} failed: ${e.message}`, 'error');
-        if (/Ollama is not running|not found\. Run: ollama pull|is a thinking model/.test(e.message)) b.tries = maxTries; // not retryable
+        if (/Ollama is not running|not found\. Run: ollama pull|is a thinking model|OLLAMA_API_KEY|not available on Ollama Cloud|Cannot reach Ollama Cloud/.test(e.message)) b.tries = maxTries; // not retryable
         else await new Promise((r) => setTimeout(r, Math.min(30000, node.retry_interval_seconds * 1000)));
       }
     }
@@ -198,6 +213,41 @@ export async function retryNode(nodeId) {
 
 export async function stopWorkflow(wfId) {
   await db.workflows.update({ _id: wfId }, { $set: { status: 'stopped', updated_at: now() } });
+}
+
+/**
+ * Re-runs a step and everything downstream of it (e.g. after changing settings).
+ * The step's own inputs must be finished, and none of the affected steps may be executing right now.
+ */
+export async function rerunFrom(wfId, name) {
+  const nodes = await db.nodes.find({ workflow_id: wfId });
+  const start = nodes.find((n) => n.name === name);
+  if (!start) throw new Error('Node not found');
+  const blocked = start.depends_on_inputs.filter((d) => nodes.find((n) => n.name === d)?.status !== 'completed');
+  if (blocked.length) throw new Error(`Finish ${blocked.join(', ')} first`);
+  const reset = new Set([name]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const n of nodes) if (!reset.has(n.name) && n.depends_on_inputs.some((d) => reset.has(d))) { reset.add(n.name); grew = true; }
+  }
+  const busy = nodes.filter((n) => reset.has(n.name) && (n.status === 'pending' || inFlight.has(n._id)));
+  if (busy.length) throw new Error(`${busy.map((n) => n.name).join(', ')} is running right now. Pause the workflow, wait for it to stop, then re-run.`);
+  const t = now();
+  const done = new Set(nodes.filter((x) => x.status === 'completed' && !reset.has(x.name)).map((x) => x.name));
+  for (const n of nodes.filter((x) => reset.has(x.name))) {
+    const first = n.name === name;
+    n.logs = [...(n.logs || []).slice(-150), { at: t, msg: first ? 'Re-run requested' : `Reset: re-running from ${name}`, level: 'info' }];
+    await db.nodes.update({ _id: n._id }, {
+      $set: {
+        // keep waiting on every input that is not finished, including ones another re-run is redoing
+        status: first ? 'ready' : 'waiting', depends_on_inputs_current: first ? [] : n.depends_on_inputs.filter((d) => !done.has(d)),
+        batches: null, progress: { done: 0, total: 0 }, output: null, try_count: 0, try_at: t, error: null, skipped: false, logs: n.logs, updated_at: t,
+      },
+      $unset: { started_at: true, finished_at: true },
+    });
+  }
+  await db.workflows.update({ _id: wfId }, { $set: { status: 'running', error: null, updated_at: t }, $unset: { finished_at: true, ...Object.fromEntries([...reset].map((r) => [`output.${r}`, true])) } });
+  return [...reset];
 }
 
 export async function resumeWorkflow(wfId) {

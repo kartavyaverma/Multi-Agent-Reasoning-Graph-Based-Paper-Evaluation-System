@@ -3,7 +3,8 @@ import path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { config } from '../../config.js';
 import { generateJson, filePart } from '../../ai/llm.js';
-import { nid, questionsOf, modelOf, JSON_RULES, fmtQuestion } from './util.js';
+import { buildPrompt } from '../prompts.js';
+import { nid, qid, qidMap, questionsOf, modelOf, JSON_RULES, fmtQuestion } from './util.js';
 
 /* ───────────── Node 1: ingest (sync) ───────────── */
 export const ingest = {
@@ -42,7 +43,7 @@ export const ingest = {
 export function normalizeManual(list, choiceRules = []) {
   const seen = new Set();
   const questions = list.map((q, i) => {
-    let id = nid(q.id || i + 1) || String(i + 1);
+    let id = qid(q.id || i + 1) || String(i + 1);
     while (seen.has(id)) id += '_';
     seen.add(id);
     return { id, text: String(q.text || '').trim(), marks: Number(q.marks) || 0, type: q.type || 'other', has_figure: !!q.has_figure, choice_group: q.choice_group || null };
@@ -54,29 +55,17 @@ export function normalizeManual(list, choiceRules = []) {
 export const parseQuestions = {
   async run(ctx) {
     if (ctx.input.manual_questions?.length) return normalizeManual(ctx.input.manual_questions, ctx.input.choice_rules);
-    return readQuestionPaper(ctx.input.question_paper);
+    return readQuestionPaper(ctx.input.question_paper, ctx.wf.settings?.prompts);
   },
 };
 
 /** Reads a question paper file with the vision model. Also used by the "Read questions" preview on the New Test page. */
-export async function readQuestionPaper(qp) {
+export async function readQuestionPaper(qp, prompts = {}) {
   {
     const parts = [
-      { text: `You are reading an exam QUESTION PAPER. Extract every question that a student must answer.
+      { text: buildPrompt('parse_questions', prompts, `${JSON_RULES}
 
-Rules:
-- Work at the LEAF level: if a question has sub-parts (a), (b), (c) each with their own marks, emit each sub-part as its own question with id like "1a", "1b". If a question has no sub-parts, use its number ("2").
-- "id" must be short, unique, and exactly how a student would label it (e.g. "1a", "4", "5ii").
-- Keep the full question text (including any given data, tables or code). Describe any figure the question shows inside text in [square brackets].
-- "marks" is a number. If marks are not printed, estimate from total marks / question count and set "marks_estimated": true.
-- "type": one of "definition","short","long","numerical","derivation","diagram","mcq","code","other".
-- "has_figure": true if the question asks the student to draw/label/plot a diagram, graph, circuit, flowchart, etc., OR provides a figure to interpret.
-- "choice_group": if the paper says "attempt any N" / "answer either A or B", give the same short string to all questions in that group (e.g. "Q3-or-Q4"), else null.
-- "choice_rules": for each choice group, how many of its questions must be counted, e.g. [{"group":"Q3-or-Q4","pick":1}] ("attempt any 2 of 3" -> pick 2). Empty array if none.
-- "instructions": general instructions printed on the paper (string).
-${JSON_RULES}
-
-Schema: {"title": string, "subject_guess": string, "total_marks": number, "instructions": string, "choice_rules":[{"group":string,"pick":number}], "questions":[{"id":string,"text":string,"marks":number,"marks_estimated":boolean,"type":string,"has_figure":boolean,"choice_group":string|null}]}` },
+Schema: {"title": string, "subject_guess": string, "total_marks": number, "instructions": string, "choice_rules":[{"group":string,"pick":number}], "questions":[{"id":string,"text":string,"marks":number,"marks_estimated":boolean,"type":string,"has_figure":boolean,"choice_group":string|null}]}`) },
       await filePart(qp.path, qp.mime),
     ];
     const res = await generateJson({
@@ -89,7 +78,7 @@ Schema: {"title": string, "subject_guess": string, "total_marks": number, "instr
         ],
       }),
     });
-    const questions = (res.questions || []).map((q) => ({ ...q, id: nid(q.id), marks: Number(q.marks) || 0 }));
+    const questions = (res.questions || []).map((q) => ({ ...q, id: qid(q.id), marks: Number(q.marks) || 0 }));
     if (!questions.length) throw new Error('No questions could be read from the question paper');
     const total = questions.reduce((s, q) => s + q.marks, 0);
     return { ...res, questions, total_marks: Number(res.total_marks) || total, computed_total: total };
@@ -101,7 +90,7 @@ export const parseModelAnswers = {
   async run(ctx) {
     const qs = questionsOf(ctx);
     const ma = ctx.input.model_answer;
-    const typed = Object.fromEntries((ctx.input.manual_questions || []).map((q) => [nid(q.id), q]));
+    const typed = Object.fromEntries((ctx.input.manual_questions || []).map((q, i) => [qid(q.id || i + 1), q]));
     const hasFile = !!ma?.path;
     if (!hasFile) {
       const complete = qs.every((q) => typed[q.id]?.key_points?.length);
@@ -113,36 +102,24 @@ export const parseModelAnswers = {
       // typed answers without a mark split: let the model derive the key points / rubric from the teacher's own text
       const res = await generateJson({
         task: 'structure_typed_answers',
-        parts: [{ text: `A teacher typed the MODEL ANSWER for each exam question. Turn each into a marking scheme.
-
-${qs.map((q) => `${fmtQuestion(q)}
+        parts: [{ text: ctx.prompt('structure_typed_answers', `${qs.map((q) => `${fmtQuestion(q)}
 TEACHER'S MODEL ANSWER: ${typed[q.id]?.model_answer || '(blank)'}
 TEACHER'S KEY POINTS: ${(typed[q.id]?.key_points || []).map((k) => `${k.text} (${k.marks})`).join(' | ') || '(none given)'}`).join('\n\n')}
 
-For EACH question id produce: "key_points" (use the teacher's key points as-is if given; otherwise split the answer into distinct creditworthy points whose marks sum to the question's marks), "rubric" (string, may be empty), "acceptable_alternatives", "common_mistakes", "figure_spec" {"required","description","labels"}. Do NOT change the teacher's "model_answer" text.
 ${JSON_RULES}
-Schema: {"answers":[{"q_id":string,"key_points":[{"id":string,"text":string,"marks":number}],"rubric":string,"acceptable_alternatives":[string],"common_mistakes":[string],"figure_spec":{"required":boolean,"description":string,"labels":[string]}}]}` }],
+Schema: {"answers":[{"q_id":string,"key_points":[{"id":string,"text":string,"marks":number}],"rubric":string,"acceptable_alternatives":[string],"common_mistakes":[string],"figure_spec":{"required":boolean,"description":string,"labels":[string]}}]}`) }],
         mock: () => ({ answers: qs.map((q) => ({ q_id: q.id, key_points: [{ id: 'k1', text: 'Core idea', marks: q.marks / 2 }, { id: 'k2', text: 'Explanation', marks: q.marks / 2 }], rubric: '', acceptable_alternatives: [], common_mistakes: [], figure_spec: { required: !!q.has_figure, description: '', labels: [] } })) }),
       });
-      const by = Object.fromEntries((res.answers || []).map((a) => [nid(a.q_id), a]));
+      const by = Object.fromEntries((res.answers || []).map((a) => [qidMap(qs)(a.q_id), a]));
       return { answers: qs.map((q) => ({ ...asAnswer(q), ...(by[q.id] || {}), q_id: q.id, model_answer: asAnswer(q).model_answer, missing_in_model: asAnswer(q).missing_in_model })) };
     }
     const parts = [
-      { text: `You are reading the TEACHER'S MODEL ANSWER / MARKING SCHEME for an exam. Align it to this list of questions:
-
+      { text: ctx.prompt('parse_model_answers', `QUESTIONS:
 ${qs.map(fmtQuestion).join('\n')}
 
-For EACH question id produce:
-- "model_answer": the complete ideal answer in plain text (keep equations/working).
-- "key_points": the distinct things an answer must contain to earn marks, each {"id":"k1","text":string,"marks":number}. If the scheme prints a mark split, use it; otherwise divide the question's marks sensibly. Sum of key_point marks should equal the question's marks.
-- "rubric": any marking guidance printed (string, may be empty), e.g. "accept alternative method", "1 mark for units".
-- "acceptable_alternatives": other valid approaches/wordings that deserve credit (array of strings).
-- "common_mistakes": typical errors (array of strings; infer if not printed).
-- "figure_spec": {"required": boolean, "description": string describing exactly what the ideal diagram/graph shows, "labels": [string required labels/parts/axes]}.
-If the model answer does not cover a question, still emit it with "missing_in_model": true and best-effort content derived from the question using standard textbook knowledge.
 ${JSON_RULES}
 
-Schema: {"answers":[{"q_id":string,"model_answer":string,"key_points":[{"id":string,"text":string,"marks":number}],"rubric":string,"acceptable_alternatives":[string],"common_mistakes":[string],"figure_spec":{"required":boolean,"description":string,"labels":[string]},"missing_in_model":boolean}]}` },
+Schema: {"answers":[{"q_id":string,"model_answer":string,"key_points":[{"id":string,"text":string,"marks":number}],"rubric":string,"acceptable_alternatives":[string],"common_mistakes":[string],"figure_spec":{"required":boolean,"description":string,"labels":[string]},"missing_in_model":boolean}]}`) },
       await filePart(ma.path, ma.mime),
     ];
     const res = await generateJson({
@@ -160,7 +137,7 @@ Schema: {"answers":[{"q_id":string,"model_answer":string,"key_points":[{"id":str
         })),
       }),
     });
-    const byId = Object.fromEntries((res.answers || []).map((a) => [nid(a.q_id), a]));
+    const byId = Object.fromEntries((res.answers || []).map((a) => [qidMap(qs)(a.q_id), a]));
     // guarantee an entry for every question
     const answers = qs.map((q) => ({
       q_id: q.id, model_answer: '', key_points: [], rubric: '', acceptable_alternatives: [], common_mistakes: [],
@@ -181,15 +158,10 @@ export const buildReferenceGraph = {
     const body = qs.map((q) => `### Q${q.id}: ${q.text}\nMODEL ANSWER: ${model[q.id]?.model_answer || '(none)'}\nKEY POINTS: ${(model[q.id]?.key_points || []).map((k) => k.text).join(' | ')}`).join('\n\n');
     const res = await generateJson({
       task: 'reference_graph',
-      parts: [{ text: `Convert each model answer into a REASONING GRAPH: a directed graph of the ideal chain of reasoning.
-- Each node is ONE atomic idea/step (a definition, principle, intermediate step, calculation, fact, or conclusion) written as a short self-contained sentence (max 25 words).
-- Edges show logical flow: "leads_to" (step order), "supports", "depends_on", "contradicts".
-- Node ids: "n1","n2",... unique within each question. 3-12 nodes per question depending on marks; include every key point as at least one node.
-- Do not invent content that is not in the model answer.
-${JSON_RULES}
+      parts: [{ text: ctx.prompt('build_reference_graph', `${JSON_RULES}
 Schema: ${GRAPH_SCHEMA}
 
-${body}` }],
+${body}`) }],
       mock: () => ({
         graphs: qs.map((q) => ({
           q_id: q.id,
@@ -198,7 +170,7 @@ ${body}` }],
         })),
       }),
     });
-    return { graphs: Object.fromEntries((res.graphs || []).map((g) => [nid(g.q_id), { nodes: g.nodes || [], edges: g.edges || [] }])) };
+    return { graphs: Object.fromEntries((res.graphs || []).map((g) => [qidMap(qs)(g.q_id), { nodes: g.nodes || [], edges: g.edges || [] }])) };
   },
 };
 

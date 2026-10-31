@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
+import { currentAcademicYear, yearOptions, fmtTerm, SEMESTERS } from '../components/ui.jsx';
 
 const ACCEPT = '.pdf,.jpg,.jpeg,.png,.webp,.heic';
 const sizeMb = (f) => (f.size < 1024 * 1024 ? `${Math.max(1, Math.round(f.size / 1024))} KB` : `${(f.size / 1024 / 1024).toFixed(1)} MB`);
@@ -100,8 +101,11 @@ function QRow({ q, i, typedAnswers, onChange, onRemove }) {
 
 export default function NewTest() {
   const nav = useNavigate();
+  const [params] = useSearchParams();
   const [subjects, setSubjects] = useState([]);
-  const [subject, setSubject] = useState('');
+  const [subject, setSubject] = useState(params.get('subject') || '');
+  const [year, setYear] = useState(params.get('year') || currentAcademicYear());
+  const [semester, setSemester] = useState(params.get('semester') || '');
   const [newSubject, setNewSubject] = useState('');
   const [title, setTitle] = useState('');
 
@@ -125,6 +129,7 @@ export default function NewTest() {
   const [err, setErr] = useState('');
 
   useEffect(() => { api.get('/subjects').then((d) => { setSubjects(d.subjects); if (!d.subjects.length) setSubject('__new'); }); }, []);
+  useEffect(() => { if (!params.get('semester')) api.get('/dashboard').then((d) => { const last = d.tests.find((t) => t.semester); if (last) { setSemester(String(last.semester)); if (!params.get('year') && last.academic_year) setYear(last.academic_year); } }).catch(() => {}); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const readQuestions = async () => {
     setReading(true); setErr(''); setReadMsg('');
@@ -166,6 +171,8 @@ export default function NewTest() {
     setErr('');
     const fd = new FormData();
     fd.append('title', title);
+    if (year.trim()) fd.append('academic_year', year.trim());
+    if (semester) fd.append('semester', semester);
     if (subject === '__new') fd.append('subject_name', newSubject); else fd.append('subject_id', subject);
     if (total) fd.append('total_marks', total);
     if (pps && single) fd.append('pages_per_student', pps);
@@ -185,7 +192,7 @@ export default function NewTest() {
 
   return (
     <form onSubmit={submit}>
-      <div className="page-head"><div className="grow"><h1>New test</h1><div className="muted">Set up the paper, the model answers and the student sheets. Evaluation starts when you submit.</div></div></div>
+      <div className="page-head"><div className="grow"><div className="eyebrow">Create</div><h1>New <em>test</em></h1><div className="muted">Set up the paper, the model answers and the student sheets. Evaluation starts when you submit.</div></div></div>
       {err && <div className="err">{err}</div>}
 
       <div className="nt-layout">
@@ -202,6 +209,18 @@ export default function NewTest() {
                 {subject === '__new' && <input style={{ marginTop: 8 }} placeholder="e.g. Engineering Physics" value={newSubject} onChange={(e) => setNewSubject(e.target.value)} />}
               </div>
               <div className="field" style={{ marginBottom: 0 }}><label>Test name</label><input placeholder="e.g. Internal Assessment 1" value={title} onChange={(e) => setTitle(e.target.value)} /></div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Academic year</label>
+                <input list="years" placeholder="e.g. 2026-27" value={year} onChange={(e) => setYear(e.target.value)} />
+                <datalist id="years">{yearOptions().map((y) => <option key={y} value={y} />)}</datalist>
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Semester</label>
+                <div className="chips" role="group" aria-label="Semester">
+                  {SEMESTERS.map((s) => <button type="button" key={s} className={semester === String(s) ? 'on' : ''} onClick={() => setSemester(semester === String(s) ? '' : String(s))}>{s}</button>)}
+                </div>
+                <div className="hint">Used to filter tests and student analytics by term.</div>
+              </div>
             </div>
           </Step>
 
@@ -263,6 +282,7 @@ export default function NewTest() {
         <aside className="nt-side">
           <div className="card">
             <h3>Summary</h3>
+            <div className="sumrow"><span>Term</span><b>{fmtTerm(year.trim(), semester)}</b></div>
             <div className="sumrow"><span>Questions</span><b>{questions.length || (qFile.length ? 'auto' : 0)}</b></div>
             <div className="sumrow"><span>Total marks</span><b>{total || sumMarks || 'auto'}</b></div>
             <div className="sumrow"><span>Students</span><b>{sMode === 'each' ? studentCount : students.length ? (pps ? `every ${pps} pages` : 'set pages') : 0}</b></div>

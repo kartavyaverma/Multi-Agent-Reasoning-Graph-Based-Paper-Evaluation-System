@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api.js';
 import { Stat, Status, Bar, Tabs, Modal, pctClass } from '../components/ui.jsx';
+import MarkedScript from './MarkedScript.jsx';
 
 const AGENT_NAMES = { logic: 'Logic', concept: 'Concept', coverage: 'Coverage', factcheck: 'Fact-check' };
 
@@ -116,7 +117,7 @@ function Learning({ g }) {
 export default function StudentPage() {
   const { id, rid } = useParams();
   const [d, setD] = useState(null);
-  const [tab, setTab] = useState('questions');
+  const [tab, setTab] = useState('script');
   const [scan, setScan] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => { api.get(`/tests/${id}/results/${rid}`).then(setD).catch((e) => setErr(e.message)); }, [id, rid]);
@@ -130,10 +131,11 @@ export default function StudentPage() {
     <>
       <div className="page-head">
         <div className="grow">
-          <div className="muted small"><Link to="/">Dashboard</Link> / <Link to={`/tests/${id}`}>{d.test.title}</Link></div>
+          <div className="crumbs"><Link to="/">Dashboard</Link><span>/</span><Link to={`/tests/${id}`}>{d.test.title}</Link><span>/</span>{r.name}</div>
           <h1>{r.name} <Status s={r.status} /></h1>
           <div className="muted">{r.roll_no ? `Roll no ${r.roll_no}` : 'Roll number not found'}{r.section ? ` - Section ${r.section}` : ''}{r.identity_confidence != null && r.identity_confidence < 0.6 ? ' - (name read with low confidence, please verify)' : ''}</div>
         </div>
+        {r.total != null && <Link className="btn" to={`/students/${r.student_key}`}>All tests &amp; analytics →</Link>}
         <button className="btn" onClick={() => setScan(true)}>View original scan</button>
       </div>
       {r.status === 'error' && <div className="err">This script could not be processed: {r.error}. Re-upload the file in a new test, or retry from the Pipeline tab.</div>}
@@ -145,9 +147,10 @@ export default function StudentPage() {
           <div className="card stat"><div className="l">Score</div><div style={{ marginTop: 14 }}><Bar value={r.percentage} cls={pctClass(r.percentage)} /></div></div>
         </div>
       )}
-      <Tabs value={tab} onChange={setTab} tabs={[['questions', 'Question-wise marks'], ['learning', 'Learning pack']]} />
+      <Tabs value={tab} onChange={setTab} tabs={[['script', 'Marked script'], ['questions', 'Question-wise marks'], ['learning', 'Learning pack']]} />
       {tab === 'questions' && r.questions.map((q) => <Question key={q.q_id} q={q} testId={id} rid={rid} onSaved={onSaved} openByDefault={q.status === 'review'} />)}
       {tab === 'learning' && <Learning g={r.gaps} />}
+      {tab === 'script' && <MarkedScript testId={id} rid={rid} result={r} test={d.test} rank={d.rank} classSize={d.class_size} onSaved={onSaved} />}
       {r.notes && <div className="hint">Transcriber notes: {r.notes}</div>}
       {scan && <Modal title={`Original script - ${r.name}`} onClose={() => setScan(false)}>{isPdf && <iframe title="scan" src={api.fileUrl(`/tests/${id}/files/unit/${r.unit_id}`)} />}</Modal>}
     </>

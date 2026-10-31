@@ -1,7 +1,17 @@
-import { config } from '../../config.js';
-
 /** Question ids become object keys in the DB, which forbids '.' and '$'. */
 export const nid = (s) => String(s).replace(/[.$\s]/g, '');
+
+/** Canonical question id: "Q1" -> "1", "Q.2a" -> "2a", "q10" -> "10" (the app adds its own "Q" when displaying). */
+export const qid = (s) => nid(s).replace(/^(?:question|ques|que|q)+\.?(?=\d)/i, '') || nid(s);
+
+/** Loose form of a question label: "Q1", "QQ1", "Q.2 (a)", "Ans 2a", "Question 4." -> "1", "1", "2a", "2a", "4". */
+const loose = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/^(?:question|ques|que|answer|ans|q)+(?=\d)/, '');
+
+/** Returns a function mapping a question label written by the model to the paper's question id. */
+export function qidMap(questions) {
+  const m = new Map((questions || []).map((q) => [loose(q.id), q.id]));
+  return (raw) => m.get(loose(raw)) ?? nid(raw);
+}
 export const clamp = (x, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, Number.isFinite(x) ? x : lo));
 export const round05 = (x) => Math.round(x * 2) / 2;
 export const mean = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
@@ -50,5 +60,3 @@ export const JSON_RULES = 'Respond with a single valid JSON object only. No mark
 export function fmtQuestion(q) {
   return `Q${q.id} [${q.marks} marks]${q.type ? ` (${q.type})` : ''}: ${q.text}`;
 }
-
-export const W = config.grading.weights;
